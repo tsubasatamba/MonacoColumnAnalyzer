@@ -15,6 +15,7 @@ link_directories(
 set(MCA_CORE_CLASSES
   src/MaterialProperties.cc
   src/EventCollection.cc
+  src/EmissionProfile.cc
   )
 
 add_library(MCACore SHARED
