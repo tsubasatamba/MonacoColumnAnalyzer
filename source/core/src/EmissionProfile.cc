@@ -4,10 +4,11 @@
 #include "EmissionProfile.hh"
 #include "Randomize.hh"
 #include "G4ThreeVector.hh"
+#include "TGraphErrors.h"
+#include "TF1.h"
 
 namespace
 {
-void writeFile(const std::vector<double>& data_x, const std::vector<double>& data_y, const std::vector<double>& data_yerr, const std::vector<double>& model_y, const std::vector<bool>& valid, const std::string& filename);
 double average(const std::vector<double>& v, const std::vector<bool>& valid);
 double stddev(const std::vector<double>& v, const std::vector<bool>& valid);
 }
@@ -18,6 +19,9 @@ void EmissionProfile::clear()
   epx_.clear();
   epy_.clear();
   angleArray_.clear();
+  modelY_.clear();
+  epycomp_.clear();
+  modelYcomp_.clear();
 }
 
 void EmissionProfile::readPulseProfile(const std::string& filename)
@@ -35,6 +39,7 @@ void EmissionProfile::readPulseProfile(const std::string& filename)
     phaseArray_.push_back(0.5*(x[i]+x[i+1]));
   }
   phaseArray_.push_back(x[n-1]+0.5*(x[n-1]-x[n-2]));
+  modelY_.resize(n, 0.0);
 }
 
 void EmissionProfile::readEmissionProfile(const std::string& filename)
@@ -45,6 +50,7 @@ void EmissionProfile::readEmissionProfile(const std::string& filename)
     epx_.push_back(x);
     epy_.push_back(y);
   }
+  fin.close();
   const int n = epx_.size();
   angleArray_.push_back(epx_[0]-0.5*(epx_[1]-epx_[0]));
   for (int i=0; i<n-1; i++) {
@@ -53,7 +59,49 @@ void EmissionProfile::readEmissionProfile(const std::string& filename)
   angleArray_.push_back(epx_[n-1]+0.5*(epx_[n-1]-epx_[n-2]));
 }
 
-void EmissionProfile::fit(double alpha, double beta, double phi_min, double phi_max, double& score, const std::string& filename)
+void EmissionProfile::readEmissionProfileComponents(const std::vector<std::string>& filelist)
+{
+  for (const std::string& filename: filelist) {
+    epycomp_.push_back(std::vector<double>());
+    std::ifstream fin(filename);
+    double x, y;
+    while (fin >> x >> y) {
+      if (y>1E18) y = 0.0;
+      epycomp_.back().push_back(y);
+    }
+    fin.close();
+  }
+  const int n = pp_->Phase().size();
+  modelYcomp_.resize(filelist.size(), std::vector<double>(n, 0.0));
+}
+
+void EmissionProfile::filterReflection(int index, double ang_min, double ang_max)
+{
+  const int n = epy_.size();
+  double selected = 0.0;
+  double all = 0.0;
+  for (int i=0; i<n; i++) {
+    all += epycomp_[index][i];
+    if (epx_[i]>ang_min && epx_[i]<ang_max) {
+      selected += epycomp_[index][i];
+    }
+    else {
+      epy_[i] -= epycomp_[index][i];
+      epycomp_[index][i] = 0.0;
+    }
+  }
+  const double ratio = all/selected;
+  
+  for (int i=0; i<n; i++) {
+    if (epx_[i]>ang_min && epx_[i]<ang_max) {
+      double increase = epycomp_[index][i]*(ratio-1.0);
+      epycomp_[index][i] *= ratio;
+      epy_[i] += increase;
+    }
+  }
+}
+
+void EmissionProfile::fit(double alpha, double beta, double phi_min, double phi_max, double& a, double& b, double& score, bool fixed_offset/*=false*/)
 {
   using std::cos;
   using std::sin;
@@ -67,17 +115,18 @@ void EmissionProfile::fit(double alpha, double beta, double phi_min, double phi_
   const G4ThreeVector los(sin(beta), 0.0, cos(beta));
 
   const int n = pp_->Data().size();
-  std::vector<double> model_y(n, -1E10);
   std::vector<bool> valid(n, true);
+
+  for (int i=0; i<n; i++) {
+    const double p = pp_->Phase()[i];
+    if (p<phi_min || p>phi_max) {
+      valid[i] = false;
+    }
+  }
   
   for (int i=0; i<n; i++) {
-    const double phi0 = (phaseArray_[i]-0.25) * twopi;
-    const double phi1 = (phaseArray_[i+1]-0.25) * twopi;
-    const double phi_center = 0.5*(phi0+phi1);
-    if (phi_center<phi_min || phi_center>phi_max) {
-      valid[i] = false;
-      continue;
-    }
+    const double phi0 = (phaseArray_[i]-0.26) * twopi;
+    const double phi1 = (phaseArray_[i+1]-0.26) * twopi;
     for (int j=0; j<numSample_; j++) {
       const double r = G4UniformRand();
       const double phi = phi0 + (phi1-phi0)*r;
@@ -88,33 +137,66 @@ void EmissionProfile::fit(double alpha, double beta, double phi_min, double phi_
       if (it==angleArray_.begin() || it==angleArray_.end()) {
         continue;
       }
-      const int index = it - angleArray_.begin() -1;
-      model_y[i] += epy_[index];
+      const int index = it - angleArray_.begin() - 1;
+      modelY_[i] += epy_[index];
+      for (int k=0; k<static_cast<int>(epycomp_.size()); k++) {
+        modelYcomp_[k][i] += epycomp_[k][index];
+      }
     }
   }
 
-  convertPulseProfile(model_y, valid);
-
-  score = calculateChiSquare(model_y, valid);
-
-  writeFile(pp_->Phase(), pp_->Data(), pp_->Error(), model_y, valid, filename);
+  
+  for (int i=0; i<static_cast<int>(modelYcomp_.size()); i++) {
+    for (int j=0; j<static_cast<int>(modelYcomp_[i].size()); j++) {
+      if (modelY_[j]==0.0) {
+        modelYcomp_[i][j] = 0.0;
+        continue;
+      }
+      modelYcomp_[i][j] /= modelY_[j];
+    }
+  }
+  
+  convertPulseProfile(modelY_, valid, a, b, fixed_offset);
+  
+  for (int i=0; i<static_cast<int>(modelYcomp_.size()); i++) {
+    for (int j=0; j<static_cast<int>(modelYcomp_[i].size()); j++) {
+      modelYcomp_[i][j] *= modelY_[j];
+    }
+  }
+  
+  score = calculateChiSquare(modelY_, valid);
 }
 
-void EmissionProfile::convertPulseProfile(std::vector<double>& model_y, const std::vector<bool>& valid)
+void EmissionProfile::convertPulseProfile(std::vector<double>& model_y, const std::vector<bool>& valid, double& a, double& b, bool fixed_offset/*=false*/)
 {
-  const double model_mu = average(model_y, valid);
-  const double model_sigma = stddev(model_y, valid);
-  const double data_mu = average(pp_->Data(), valid);
-  const double data_sigma = stddev(pp_->Data(), valid);
-  const double a = data_sigma/model_sigma;
-  const double b = data_mu/(model_mu*a);
-  
   const int n = model_y.size();
+  int num = 0;
   for (int i=0; i<n; i++) {
-    if (!valid[i]) {
-      continue;
-    }
-    model_y[i] = a*model_y[i]+b;  
+    if (valid[i]) num++;
+  }
+
+  TGraphErrors* gr = new TGraphErrors(num);
+  int index = 0;
+  for (int i=0; i<n; i++) {
+    if (!valid[i]) continue;
+    gr->SetPoint(index, model_y[i], pp_->Data()[i]);
+    gr->SetPointError(index, 0.0, pp_->Error()[i]);
+    index++;
+  }
+  TF1* f = new TF1("f1", "[0]*x+[1]");
+  f->SetParameter(0, 1E-9);
+  f->SetParLimits(0, 1E-10, 1E-7);
+  f->SetParameter(1, 0.0);
+  if (fixed_offset) {
+    f->SetParLimits(1, 0.0, 1E-15);
+  }
+  gr->Fit("f1");
+  
+  a = f->GetParameter(0);
+  b = f->GetParameter(1);
+  
+  for (int i=0; i<n; i++) {
+    model_y[i] = a*model_y[i]+b;
   }
 }
 
@@ -131,10 +213,13 @@ double EmissionProfile::calculateChiSquare(const std::vector<double>& my, const 
   return cs;
 }
 
-namespace
+void EmissionProfile::writeFile(const std::string& filename)
 {
-void writeFile(const std::vector<double>& data_x, const std::vector<double>& data_y, const std::vector<double>& data_yerr, const std::vector<double>& model_y, const std::vector<bool>& valid, const std::string& filename)
-{
+  std::vector<double>& data_x = pp_->Phase();
+  std::vector<double>& data_y = pp_->Data();
+  std::vector<double>& data_yerr = pp_->Error();
+  std::vector<double>& model_y = ModelY();
+  
   std::ofstream fout(filename);
   const int n = data_x.size();
 
@@ -142,14 +227,19 @@ void writeFile(const std::vector<double>& data_x, const std::vector<double>& dat
     std::cerr << "ERROR: different size for x and y" << std::endl;
     return;
   }
-
   for (int i=0; i<n; i++) {
-    if (!valid[i]) continue;
-    fout << data_x[i] << " " << data_y[i] << " " << data_yerr[i] << " " << model_y[i] << "\n";
+    fout << data_x[i] << " " << data_y[i] << " " << data_yerr[i] << " " << model_y[i];
+    for (int j=0; j<static_cast<int>(modelYcomp_.size()); j++) {
+      fout << " " << modelYcomp_[j][i];
+    }
+    fout << "\n";
   }
+
   fout.close(); 
 }
 
+namespace
+{
 double average(const std::vector<double>& v, const std::vector<bool>& valid)
 {
   const int n = v.size();

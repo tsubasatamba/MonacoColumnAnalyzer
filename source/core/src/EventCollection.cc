@@ -92,9 +92,7 @@ void EventCollection::calculateBeamPattern()
       }
     }
     else {
-      if (dirz_>0) {
-        id |= 1<<2; //reflection
-      }
+      id |= 1<<2; //reflection
     }
     beamPattern_[i] = id;
   }
