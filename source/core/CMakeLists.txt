@@ -16,6 +16,7 @@ set(MCA_CORE_CLASSES
   src/MaterialProperties.cc
   src/EventCollection.cc
   src/EmissionProfile.cc
+  src/ReflectionPosition.cc
   )
 
 add_library(MCACore SHARED

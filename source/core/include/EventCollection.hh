@@ -23,6 +23,14 @@ public:
 
   double SeedGamma() { return seedGamma_; }
   std::vector<double>& Weight() { return weight_; }
+  std::vector<int>& BeamPattern() { return beamPattern_; }
+
+  TChain* Etree() { return etree_; }
+  double Energy() { return energy_; }
+  double Posx() { return posx_; }
+  double Posy() { return posy_; }
+  double Dirz() { return dirz_; }
+
     
 private:
   std::unique_ptr<MaterialProperties> mp_;
